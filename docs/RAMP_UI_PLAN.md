@@ -37,48 +37,53 @@ Users who prefer visual interfaces over command-line tools, making Ramp more acc
 
 ## Directory Structure
 
+**Note:** The actual implementation differs slightly from the original plan. The Go backend is integrated into the main module to reuse `internal/` packages directly.
+
 ```
-ramp-ui/
-├── backend/                    # Go HTTP server
-│   ├── main.go                 # HTTP server entry point
-│   ├── api/                    # API handlers
-│   │   ├── projects.go         # List/add/remove projects
-│   │   ├── features.go         # Up/down/list features
-│   │   ├── commands.go         # Run custom commands
-│   │   ├── git.go              # Git status operations
-│   │   └── websocket.go        # Real-time updates
-│   ├── models/                 # API request/response types
-│   └── go.mod                  # References ../internal
-│
-├── frontend/                   # Electron + React app
-│   ├── public/
-│   ├── src/
-│   │   ├── main/               # Electron main process
-│   │   │   ├── index.ts        # Main entry, spawns Go backend
-│   │   │   └── ipc.ts          # IPC handlers
-│   │   ├── renderer/           # React app
-│   │   │   ├── App.tsx
-│   │   │   ├── components/
-│   │   │   │   ├── ProjectList.tsx
-│   │   │   │   ├── ProjectView.tsx
-│   │   │   │   ├── FeatureList.tsx
-│   │   │   │   ├── FeatureView.tsx
-│   │   │   │   ├── CommandButton.tsx
-│   │   │   │   └── Terminal.tsx  # Optional: xterm.js
-│   │   │   ├── hooks/
-│   │   │   │   └── useRampAPI.ts
-│   │   │   ├── types/          # TypeScript types
-│   │   │   └── styles/         # CSS/styled-components
-│   │   └── preload/            # Preload script
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── vite.config.ts          # Use Vite for fast builds
-│   └── electron-builder.yml    # Build configuration
-│
-├── shared/                     # Shared type definitions
-│   └── types.ts               # Generated from Go types
-│
-└── README.md
+# Go Backend (integrated into main module)
+cmd/ramp-ui/
+└── main.go                 # HTTP server entry point
+
+internal/uiapi/             # API handlers and models
+├── server.go               # Server setup and routing
+├── projects.go             # List/add/remove projects
+├── features.go             # Up/down/list features
+├── websocket.go            # Real-time updates
+├── appconfig.go            # App configuration storage
+├── models.go               # API request/response types
+├── utils.go                # Helper functions
+├── appconfig_test.go       # Tests
+└── projects_test.go        # Tests
+
+# Electron Frontend
+ramp-ui/frontend/
+├── src/
+│   ├── main/               # Electron main process
+│   │   ├── index.ts        # Main entry, spawns Go backend
+│   │   └── preload.ts      # Preload script for IPC
+│   └── renderer/           # React app
+│       ├── App.tsx
+│       ├── components/
+│       │   ├── ProjectList.tsx
+│       │   ├── ProjectView.tsx
+│       │   ├── FeatureList.tsx
+│       │   ├── NewFeatureDialog.tsx
+│       │   └── EmptyState.tsx
+│       ├── hooks/
+│       │   └── useRampAPI.ts
+│       ├── types/
+│       │   ├── index.ts
+│       │   └── electron.d.ts
+│       └── styles/
+│           └── index.css   # Tailwind CSS
+├── resources/              # Backend binary location
+├── package.json
+├── tsconfig.json
+├── tsconfig.main.json
+├── vite.config.ts
+├── tailwind.config.js
+├── postcss.config.js
+└── electron-builder.yml
 ```
 
 ## Technology Stack
@@ -513,16 +518,16 @@ This configuration allows `electron-updater` to:
 ### Setup
 
 ```bash
-# Install backend dependencies
-cd ramp-ui/backend
-go mod download
-
-# Build backend
-go build -o ramp-server .
+# Build backend binary (from project root)
+mkdir -p ramp-ui/frontend/resources
+go build -o ramp-ui/frontend/resources/ramp-server ./cmd/ramp-ui
 
 # Install frontend dependencies
-cd ../frontend
+cd ramp-ui/frontend
 npm install
+
+# Build Electron main process (including preload)
+npm run build:electron
 
 # Start development mode (hot reload)
 npm run dev
@@ -539,85 +544,88 @@ Vite provides hot module replacement for fast iteration:
 ### Building for Production
 
 ```bash
+# From project root:
+
 # Build backend binary
-cd ramp-ui/backend
-go build -o ../frontend/resources/ramp-server .
+go build -o ramp-ui/frontend/resources/ramp-server ./cmd/ramp-ui
 
 # Build Electron app
-cd ../frontend
-npm run build
-npm run package  # Creates distributable
+cd ramp-ui/frontend
+npm run build          # Build renderer (Vite)
+npm run build:electron # Build main process (TypeScript)
+npm run package        # Creates distributable
 ```
 
-Add to root `Makefile`:
+Potential `Makefile` targets:
 ```makefile
 build-ui:
-	cd ramp-ui/backend && go build -o ../frontend/resources/ramp-server .
-	cd ramp-ui/frontend && npm run build && npm run package
+	go build -o ramp-ui/frontend/resources/ramp-server ./cmd/ramp-ui
+	cd ramp-ui/frontend && npm run build && npm run build:electron && npm run package
 
 install-ui-deps:
-	cd ramp-ui/backend && go mod download
 	cd ramp-ui/frontend && npm install
 ```
 
 ## Implementation Phases
 
-### Phase 1: Core Infrastructure (Week 1)
-- [ ] Create `ramp-ui/` directory structure
-- [ ] Set up Go HTTP server with basic routing
-- [ ] Implement project listing endpoint
-- [ ] Scaffold Electron app with React + Vite
-- [ ] Implement subprocess management (Electron spawns Go)
-- [ ] Create basic API client hook in React
-- [ ] Test end-to-end communication
+### Phase 1: Core Infrastructure ✅ COMPLETE
+- [x] Create `ramp-ui/` directory structure
+- [x] Set up Go HTTP server with basic routing (gorilla/mux)
+- [x] Implement project listing endpoint
+- [x] Scaffold Electron app with React + Vite + Tailwind CSS
+- [x] Implement subprocess management (Electron spawns Go)
+- [x] Create basic API client hook in React (TanStack Query)
+- [x] Test end-to-end communication
+- [x] Add unit tests for uiapi package (22 tests)
 
 **Deliverable:** App launches, backend starts, can list projects (even if empty)
 
-### Phase 2: Project Management (Week 2)
-- [ ] Build project list UI component
-- [ ] Implement empty state with "Add Project" CTA
-- [ ] Create directory picker dialog
-- [ ] Add project validation (check for `.ramp/ramp.yaml`)
-- [ ] Implement project storage in app config
-- [ ] Build project detail view showing configuration
-- [ ] Create feature list component for selected project
+### Phase 2: Project Management ✅ COMPLETE
+- [x] Build project list UI component
+- [x] Implement empty state with "Add Project" CTA
+- [x] Create directory picker dialog (native IPC)
+- [x] Add project validation (check for `.ramp/ramp.yaml`)
+- [x] Implement project storage in app config (platform-specific paths)
+- [x] Build project detail view showing configuration (repos, branch prefix, ports, scripts)
+- [x] Create feature list component for selected project (expandable with worktree details)
+- [x] Add preload script for secure IPC communication
 
 **Deliverable:** Can add projects, view project details, see existing features
 
-### Phase 3: Feature Operations (Week 3)
-- [ ] Build "New Feature" dialog with form validation
-- [ ] Implement WebSocket connection for real-time updates
-- [ ] Create progress UI component (spinner, status messages)
-- [ ] Wire up "Create Feature" flow (`ramp up`)
-- [ ] Implement feature deletion with confirmation dialog
-- [ ] Add uncommitted changes warning
-- [ ] Comprehensive error handling and user feedback
+### Phase 3: Feature Operations ✅ COMPLETE
+- [x] Build "New Feature" dialog with form validation
+- [x] Implement WebSocket connection for real-time updates
+- [x] Create progress UI component (spinner, status messages)
+- [x] Wire up "Create Feature" flow (`ramp up`)
+- [x] Implement feature deletion with confirmation dialog
+- [x] Add uncommitted changes warning (badge in feature list)
+- [x] Fixed config.LoadConfig path bug in features.go
 
 **Deliverable:** Full feature lifecycle (create, view, delete)
 
-### Phase 4: Custom Commands (Week 4)
-- [ ] Parse custom commands from project config
-- [ ] Render command buttons dynamically
-- [ ] Implement command execution endpoint
-- [ ] Stream command output via WebSocket
-- [ ] Build command output viewer component
-- [ ] Add command history/logs
+### Phase 4: Custom Commands ✅ COMPLETE
+- [x] Parse custom commands from project config
+- [x] Render command buttons dynamically
+- [x] Implement command execution endpoint (commands.go)
+- [x] Stream command output via WebSocket
+- [x] Build command output viewer component (CommandOutputViewer.tsx)
+- [x] Wire up command buttons to execute with useRunCommand hook
 
 **Deliverable:** Can run custom commands and see output
 
-### Phase 5: Nice-to-Haves (Week 5+)
+### Phase 5: Nice-to-Haves
 - [ ] Integrate xterm.js for embedded terminal
 - [ ] "Open in Terminal" button (opens native terminal at path)
-- [ ] Git status visualization (uncommitted changes badge, branch info)
+- [x] Git status visualization (uncommitted changes badge)
 - [ ] Implement refresh operation UI
 - [ ] Implement prune operation UI
 - [ ] Settings panel (theme, update preferences)
-- [ ] Dark/light theme support
+- [x] Dark/light theme support (Tailwind dark mode classes in place)
 
 **Deliverable:** Polished UX with advanced features
 
-### Phase 6: Distribution (Week 6)
-- [ ] Configure electron-builder for all platforms
+### Phase 6: Distribution
+- [x] Configure electron-builder for all platforms (electron-builder.yml)
 - [ ] Set up code signing certificates (macOS/Windows)
 - [ ] Implement Electron auto-updater integration
 - [ ] Configure update channels (stable/beta)
@@ -679,4 +687,21 @@ ramp up feat-1 --json  # JSON output with progress updates
 
 ---
 
-**Next Steps**: Create directory structure and implement Phase 1 (Core Infrastructure)
+## Current Status
+
+**Phases 1-4 Complete.** The app can:
+- Launch and start the Go backend automatically
+- Add projects via native directory picker
+- Validate `.ramp/ramp.yaml` exists
+- Display project configuration (repos, branch prefix, base port, setup/cleanup scripts)
+- Show existing features with expandable worktree details
+- Remove projects from the app
+- Create new features (`ramp up` equivalent)
+- Delete features with uncommitted changes warning (`ramp down` equivalent)
+- Run custom commands with real-time output streaming
+- View command output in terminal-style modal
+
+**Next Steps**:
+1. Test the current implementation locally (`npm run dev` in `ramp-ui/frontend`)
+2. Phase 5 - Nice-to-haves (xterm.js, refresh/prune UI, settings panel)
+3. Phase 6 - Distribution (code signing, auto-updater, GitHub Actions)
