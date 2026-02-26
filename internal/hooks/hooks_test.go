@@ -313,3 +313,84 @@ func TestValidateHookEvent(t *testing.T) {
 		})
 	}
 }
+
+func TestRunHook_ShellCommand(t *testing.T) {
+	// Test that hooks can be shell commands (containing spaces)
+	projectDir := t.TempDir()
+	markerFile := filepath.Join(t.TempDir(), "marker.txt")
+
+	// Create hook with inline shell command (contains space)
+	hook := &config.Hook{
+		Event:   "up",
+		Command: "echo SHELL_HOOK > " + markerFile,
+	}
+
+	err := runHook(hook, projectDir, projectDir, nil)
+	if err != nil {
+		t.Fatalf("runHook() error = %v", err)
+	}
+
+	// Verify the shell command executed
+	content, err := os.ReadFile(markerFile)
+	if err != nil {
+		t.Fatalf("hook did not create marker file: %v", err)
+	}
+
+	if string(content) != "SHELL_HOOK\n" {
+		t.Errorf("marker file content = %q, want %q", string(content), "SHELL_HOOK\n")
+	}
+}
+
+func TestRunHook_ShellCommandWithEnvVars(t *testing.T) {
+	// Test that shell command hooks can access environment variables
+	projectDir := t.TempDir()
+	markerFile := filepath.Join(t.TempDir(), "marker.txt")
+
+	hook := &config.Hook{
+		Event:   "up",
+		Command: "echo $TEST_VAR > " + markerFile,
+	}
+
+	env := map[string]string{
+		"TEST_VAR": "ENV_VALUE",
+	}
+
+	err := runHook(hook, projectDir, projectDir, env)
+	if err != nil {
+		t.Fatalf("runHook() error = %v", err)
+	}
+
+	content, err := os.ReadFile(markerFile)
+	if err != nil {
+		t.Fatalf("hook did not create marker file: %v", err)
+	}
+
+	if string(content) != "ENV_VALUE\n" {
+		t.Errorf("marker file content = %q, want %q", string(content), "ENV_VALUE\n")
+	}
+}
+
+func TestRunHook_ShellCommandWithPipe(t *testing.T) {
+	// Test that shell command hooks support pipes
+	projectDir := t.TempDir()
+	markerFile := filepath.Join(t.TempDir(), "marker.txt")
+
+	hook := &config.Hook{
+		Event:   "up",
+		Command: "echo 'line1\nline2\nline3' | grep line2 > " + markerFile,
+	}
+
+	err := runHook(hook, projectDir, projectDir, nil)
+	if err != nil {
+		t.Fatalf("runHook() error = %v", err)
+	}
+
+	content, err := os.ReadFile(markerFile)
+	if err != nil {
+		t.Fatalf("hook did not create marker file: %v", err)
+	}
+
+	if string(content) != "line2\n" {
+		t.Errorf("marker file content = %q, want %q", string(content), "line2\n")
+	}
+}

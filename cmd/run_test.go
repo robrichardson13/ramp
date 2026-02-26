@@ -156,9 +156,9 @@ func TestRunCommandScriptNotFound(t *testing.T) {
 		t.Fatal("runCustomCommand() should fail for missing script file")
 	}
 
-	// Error should contain "command script not found"
-	if !strings.Contains(err.Error(), "command script not found") {
-		t.Errorf("error should contain 'command script not found', got %q", err.Error())
+	// Error should contain "script not found"
+	if !strings.Contains(err.Error(), "script not found") {
+		t.Errorf("error should contain 'script not found', got %q", err.Error())
 	}
 }
 

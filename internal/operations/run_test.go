@@ -821,3 +821,355 @@ echo "ARG2=$2"
 		t.Errorf("Expected ARG2=--flag=value, got output: %v", output.Lines)
 	}
 }
+
+// === SHELL COMMAND TESTS ===
+
+// AddShellCommand adds a custom command with an inline shell command (not a script file)
+func (tp *TestProject) AddShellCommand(name, command, scope string) {
+	tp.t.Helper()
+
+	tp.Config.Commands = append(tp.Config.Commands, &config.Command{
+		Name:    name,
+		Command: command,
+		Scope:   scope,
+	})
+
+	if err := config.SaveConfig(tp.Config, tp.Dir); err != nil {
+		tp.t.Fatalf("failed to save config: %v", err)
+	}
+}
+
+func TestRunCommand_ShellCommand_SourceMode(t *testing.T) {
+	tp := NewTestProject(t)
+	tp.InitRepo("repo1")
+
+	// Add a shell command (not a script file)
+	tp.AddShellCommand("echo-test", "echo 'SHELL_COMMAND_WORKS'", "")
+
+	progress := &MockProgressReporter{}
+	output := &MockOutputStreamer{}
+
+	// Run the shell command in source mode
+	_, err := RunCommand(RunOptions{
+		ProjectDir:  tp.Dir,
+		Config:      tp.Config,
+		CommandName: "echo-test",
+		FeatureName: "", // source mode
+		Progress:    progress,
+		Output:      output,
+	})
+	if err != nil {
+		t.Fatalf("RunCommand() error = %v", err)
+	}
+
+	// Verify the shell command executed
+	found := false
+	for _, line := range output.Lines {
+		if line == "SHELL_COMMAND_WORKS" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected 'SHELL_COMMAND_WORKS' in output, got: %v", output.Lines)
+	}
+}
+
+func TestRunCommand_ShellCommand_FeatureMode(t *testing.T) {
+	tp := NewTestProject(t)
+	tp.InitRepo("repo1")
+
+	// Add a shell command with feature scope
+	tp.AddShellCommand("echo-feature", "echo \"FEATURE=$RAMP_WORKTREE_NAME\"", "feature")
+
+	progress := &MockProgressReporter{}
+
+	// Create a feature first
+	_, err := Up(UpOptions{
+		FeatureName: "my-feature",
+		ProjectDir:  tp.Dir,
+		Config:      tp.Config,
+		Progress:    progress,
+		SkipRefresh: true,
+	})
+	if err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+
+	output := &MockOutputStreamer{}
+
+	// Run the shell command in feature mode
+	_, err = RunCommand(RunOptions{
+		ProjectDir:  tp.Dir,
+		Config:      tp.Config,
+		CommandName: "echo-feature",
+		FeatureName: "my-feature",
+		Progress:    progress,
+		Output:      output,
+	})
+	if err != nil {
+		t.Fatalf("RunCommand() error = %v", err)
+	}
+
+	// Verify the shell command executed with feature env var
+	found := false
+	for _, line := range output.Lines {
+		if line == "FEATURE=my-feature" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected 'FEATURE=my-feature' in output, got: %v", output.Lines)
+	}
+}
+
+func TestRunCommand_ShellCommand_WithPipe(t *testing.T) {
+	tp := NewTestProject(t)
+	tp.InitRepo("repo1")
+
+	// Add a shell command that uses pipe
+	tp.AddShellCommand("pipe-test", "echo 'line1\nline2\nline3' | grep line2", "")
+
+	progress := &MockProgressReporter{}
+	output := &MockOutputStreamer{}
+
+	_, err := RunCommand(RunOptions{
+		ProjectDir:  tp.Dir,
+		Config:      tp.Config,
+		CommandName: "pipe-test",
+		FeatureName: "", // source mode
+		Progress:    progress,
+		Output:      output,
+	})
+	if err != nil {
+		t.Fatalf("RunCommand() error = %v", err)
+	}
+
+	// Verify pipe worked
+	found := false
+	for _, line := range output.Lines {
+		if line == "line2" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected 'line2' in output from pipe command, got: %v", output.Lines)
+	}
+}
+
+func TestRunCommand_ShellCommand_WithArgs(t *testing.T) {
+	tp := NewTestProject(t)
+	tp.InitRepo("repo1")
+
+	// Add a shell command that uses arguments
+	// Note: command must contain a space to be recognized as a shell command
+	tp.AddShellCommand("echo-with-args", "echo PREFIX:", "")
+
+	progress := &MockProgressReporter{}
+	output := &MockOutputStreamer{}
+
+	// Run with arguments (these get appended to the command)
+	_, err := RunCommand(RunOptions{
+		ProjectDir:  tp.Dir,
+		Config:      tp.Config,
+		CommandName: "echo-with-args",
+		FeatureName: "", // source mode
+		Args:        []string{"hello", "world"},
+		Progress:    progress,
+		Output:      output,
+	})
+	if err != nil {
+		t.Fatalf("RunCommand() error = %v", err)
+	}
+
+	// Verify args were passed to shell command
+	found := false
+	for _, line := range output.Lines {
+		if line == "PREFIX: hello world" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected 'PREFIX: hello world' in output, got: %v", output.Lines)
+	}
+}
+
+func TestRunCommand_ShellCommand_ArgsWithSpecialChars(t *testing.T) {
+	// Test that arguments with shell metacharacters are handled safely
+	// (no shell injection via $(), backticks, semicolons, etc.)
+	tp := NewTestProject(t)
+	tp.InitRepo("repo1")
+
+	// Shell command that echoes its arguments (needs space to be recognized as shell command)
+	// Using "echo --" so the space is preserved after TrimSpace
+	tp.AddShellCommand("echo-special", "echo --", "")
+
+	progress := &MockProgressReporter{}
+	output := &MockOutputStreamer{}
+
+	// Arguments with characters that would be dangerous if shell-expanded
+	_, err := RunCommand(RunOptions{
+		ProjectDir:  tp.Dir,
+		Config:      tp.Config,
+		CommandName: "echo-special",
+		FeatureName: "", // source mode
+		Args:        []string{"$HOME", "$(whoami)", "`id`", "a;b", "a&&b"},
+		Progress:    progress,
+		Output:      output,
+	})
+	if err != nil {
+		t.Fatalf("RunCommand() error = %v", err)
+	}
+
+	// Arguments should be passed literally, not shell-expanded
+	// If shell injection occurred, $HOME would expand to a path, $(whoami) to a username, etc.
+	// Note: "echo --" outputs "-- " followed by args
+	found := false
+	for _, line := range output.Lines {
+		if line == "-- $HOME $(whoami) `id` a;b a&&b" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected literal args without shell expansion, got: %v", output.Lines)
+	}
+}
+
+func TestRunCommand_ShellCommand_BunScript(t *testing.T) {
+	// This test simulates the issue: running a bun/node script directly
+	tp := NewTestProject(t)
+	tp.InitRepo("repo1")
+
+	// Create a simple test script in the project root (where shell commands run)
+	scriptsDir := filepath.Join(tp.Dir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0755); err != nil {
+		t.Fatalf("failed to create scripts dir: %v", err)
+	}
+
+	// Create a simple script that outputs something
+	scriptContent := `#!/usr/bin/env bash
+echo "EXECUTED_VIA_SHELL"
+`
+	scriptPath := filepath.Join(scriptsDir, "test-script.sh")
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	// Add command that runs it via shell (like "bun scripts/test.ts" would)
+	// Using bash instead of bun for test portability
+	// Shell commands run from the project directory, so use relative path from there
+	tp.AddShellCommand("run-script", "bash scripts/test-script.sh", "")
+
+	progress := &MockProgressReporter{}
+	output := &MockOutputStreamer{}
+
+	_, err := RunCommand(RunOptions{
+		ProjectDir:  tp.Dir,
+		Config:      tp.Config,
+		CommandName: "run-script",
+		FeatureName: "", // source mode
+		Progress:    progress,
+		Output:      output,
+	})
+	if err != nil {
+		t.Fatalf("RunCommand() error = %v", err)
+	}
+
+	// Verify script was executed via shell
+	found := false
+	for _, line := range output.Lines {
+		if line == "EXECUTED_VIA_SHELL" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected 'EXECUTED_VIA_SHELL' in output, got: %v", output.Lines)
+	}
+}
+
+func TestRunCommand_ShellCommand_EnvVarSubstitution(t *testing.T) {
+	tp := NewTestProject(t)
+	tp.InitRepo("repo1")
+
+	// Add a shell command that uses environment variable
+	tp.AddShellCommand("env-test", "echo \"PROJECT=$RAMP_PROJECT_DIR\"", "")
+
+	progress := &MockProgressReporter{}
+	output := &MockOutputStreamer{}
+
+	_, err := RunCommand(RunOptions{
+		ProjectDir:  tp.Dir,
+		Config:      tp.Config,
+		CommandName: "env-test",
+		FeatureName: "", // source mode
+		Progress:    progress,
+		Output:      output,
+	})
+	if err != nil {
+		t.Fatalf("RunCommand() error = %v", err)
+	}
+
+	// Verify env var was substituted
+	expected := "PROJECT=" + tp.Dir
+	found := false
+	for _, line := range output.Lines {
+		if line == expected {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected '%s' in output, got: %v", expected, output.Lines)
+	}
+}
+
+func TestRunCommand_ScriptFile_StillWorks(t *testing.T) {
+	// Verify that existing script file commands still work
+	tp := NewTestProject(t)
+	tp.InitRepo("repo1")
+
+	// Use the existing AddCommand helper which creates a script file
+	tp.AddCommand("script-test", `#!/bin/bash
+echo "SCRIPT_FILE_WORKS"
+`)
+
+	progress := &MockProgressReporter{}
+	output := &MockOutputStreamer{}
+
+	_, err := RunCommand(RunOptions{
+		ProjectDir:  tp.Dir,
+		Config:      tp.Config,
+		CommandName: "script-test",
+		FeatureName: "", // source mode
+		Progress:    progress,
+		Output:      output,
+	})
+	if err != nil {
+		t.Fatalf("RunCommand() error = %v", err)
+	}
+
+	// Verify script executed
+	found := false
+	for _, line := range output.Lines {
+		if line == "SCRIPT_FILE_WORKS" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected 'SCRIPT_FILE_WORKS' in output, got: %v", output.Lines)
+	}
+}

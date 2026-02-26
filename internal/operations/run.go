@@ -78,21 +78,13 @@ func RunCommand(opts RunOptions) (*RunResult, error) {
 		return nil, fmt.Errorf("command '%s' requires a feature name", commandName)
 	}
 
-	// Resolve script path based on BaseDir (set during config merge)
-	var scriptPath string
-	if filepath.IsAbs(command.Command) {
-		scriptPath = command.Command
-	} else if command.BaseDir != "" {
-		scriptPath = filepath.Join(command.BaseDir, command.Command)
-	} else {
-		// Fallback for backward compatibility
-		scriptPath = filepath.Join(projectDir, ".ramp", command.Command)
+	// Resolve the command: detect shell commands vs file paths and resolve paths
+	resolved, resolveErr := config.ResolveCommand(command.Command, command.BaseDir, projectDir)
+	if resolveErr != nil {
+		return nil, fmt.Errorf("command '%s': %w", commandName, resolveErr)
 	}
-
-	// Validate script exists
-	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("command script not found: %s", scriptPath)
-	}
+	scriptPath := resolved.Path
+	isShellCommand := resolved.IsShellCommand
 
 	start := time.Now()
 
@@ -102,7 +94,7 @@ func RunCommand(opts RunOptions) (*RunResult, error) {
 	if featureName == "" {
 		// Source mode
 		progress.Start(fmt.Sprintf("Running '%s' against source repositories", commandName))
-		exitCode, err = runInSource(opts, scriptPath)
+		exitCode, err = runInSource(opts, scriptPath, isShellCommand)
 	} else {
 		// Feature mode
 		treesDir := filepath.Join(projectDir, "trees", featureName)
@@ -113,7 +105,7 @@ func RunCommand(opts RunOptions) (*RunResult, error) {
 		}
 
 		progress.Start(fmt.Sprintf("Running '%s' for feature '%s'", commandName, featureName))
-		exitCode, err = runInFeature(opts, scriptPath, treesDir)
+		exitCode, err = runInFeature(opts, scriptPath, treesDir, isShellCommand)
 	}
 
 	duration := time.Since(start)
@@ -185,6 +177,19 @@ func buildBashCommand(scriptPath string, args []string, workDir string) *exec.Cm
 	return cmd
 }
 
+// buildShellCommand creates an exec.Cmd for running a shell command string.
+// Uses bash -l -c to execute arbitrary shell commands (pipes, redirects, etc.).
+// Arguments are passed safely via "$@" to avoid shell injection.
+func buildShellCommand(command string, args []string, workDir string) *exec.Cmd {
+	// Use 'bash -c 'cmd "$@"' _ arg1 arg2' pattern to safely pass arguments
+	// without shell expansion. The "_" is a placeholder for $0.
+	bashArgs := []string{"-l", "-c", command + ` "$@"`, "_"}
+	bashArgs = append(bashArgs, args...)
+	cmd := exec.Command("/bin/bash", bashArgs...)
+	cmd.Dir = workDir
+	return cmd
+}
+
 // appendArgsEnv adds RAMP_ARGS to the environment if args are provided.
 func appendArgsEnv(env []string, args []string) []string {
 	if len(args) > 0 {
@@ -194,7 +199,7 @@ func appendArgsEnv(env []string, args []string) []string {
 }
 
 // runInFeature executes a command in feature mode with feature-specific env vars.
-func runInFeature(opts RunOptions, scriptPath, treesDir string) (int, error) {
+func runInFeature(opts RunOptions, scriptPath, treesDir string, isShellCommand bool) (int, error) {
 	projectDir := opts.ProjectDir
 	cfg := opts.Config
 	featureName := opts.FeatureName
@@ -209,7 +214,12 @@ func runInFeature(opts RunOptions, scriptPath, treesDir string) (int, error) {
 		}
 	}
 
-	cmd := buildBashCommand(scriptPath, opts.Args, treesDir)
+	var cmd *exec.Cmd
+	if isShellCommand {
+		cmd = buildShellCommand(scriptPath, opts.Args, treesDir)
+	} else {
+		cmd = buildBashCommand(scriptPath, opts.Args, treesDir)
+	}
 
 	// Build environment variables using the standard builder, but override repo paths for worktrees
 	repos := cfg.GetRepos()
@@ -231,11 +241,16 @@ func runInFeature(opts RunOptions, scriptPath, treesDir string) (int, error) {
 }
 
 // runInSource executes a command in source mode against the project directory.
-func runInSource(opts RunOptions, scriptPath string) (int, error) {
+func runInSource(opts RunOptions, scriptPath string, isShellCommand bool) (int, error) {
 	projectDir := opts.ProjectDir
 	cfg := opts.Config
 
-	cmd := buildBashCommand(scriptPath, opts.Args, projectDir)
+	var cmd *exec.Cmd
+	if isShellCommand {
+		cmd = buildShellCommand(scriptPath, opts.Args, projectDir)
+	} else {
+		cmd = buildBashCommand(scriptPath, opts.Args, projectDir)
+	}
 
 	// Build environment variables (excluding feature-specific vars)
 	cmd.Env = append(os.Environ(),
