@@ -59,9 +59,53 @@ type Command struct {
 // Hook represents a script to execute at a specific lifecycle event.
 type Hook struct {
 	Event   string `yaml:"event"`         // up, down, run
-	Command string `yaml:"command"`       // Path to script relative to .ramp/
+	Command string `yaml:"command"`       // Script path (relative to .ramp/) or shell command (if contains spaces)
 	For     string `yaml:"for,omitempty"` // For run hooks: command name, prefix pattern (e.g., "test-*"), or empty for all
 	BaseDir string `yaml:"-"`             // Set during merge, excluded from YAML
+}
+
+// ResolvedCommand holds the result of resolving a command string.
+type ResolvedCommand struct {
+	Path           string // Resolved script path or shell command string
+	IsShellCommand bool   // True if this is a shell command (contains spaces)
+}
+
+// ResolveCommand determines whether a command string is a shell command or file path,
+// and resolves file paths using baseDir with a projectDir fallback.
+//
+// Heuristic: commands containing a space are shell commands (e.g., "bun scripts/test.ts"),
+// commands without spaces are file paths (e.g., "scripts/test.sh").
+//
+// For file paths, resolution order is: absolute path > baseDir > projectDir/.ramp/ fallback.
+// Returns an error if a file path does not exist on disk.
+func ResolveCommand(command, baseDir, projectDir string) (ResolvedCommand, error) {
+	// Trim whitespace to handle YAML quirks (e.g., trailing spaces)
+	command = strings.TrimSpace(command)
+
+	// Reject empty commands early - an empty string would resolve to a directory
+	// path that passes os.Stat but fails at execution
+	if command == "" {
+		return ResolvedCommand{}, fmt.Errorf("command is empty")
+	}
+
+	if strings.Contains(command, " ") {
+		return ResolvedCommand{Path: command, IsShellCommand: true}, nil
+	}
+
+	var scriptPath string
+	if filepath.IsAbs(command) {
+		scriptPath = command
+	} else if baseDir != "" {
+		scriptPath = filepath.Join(baseDir, command)
+	} else {
+		scriptPath = filepath.Join(projectDir, ".ramp", command)
+	}
+
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		return ResolvedCommand{}, fmt.Errorf("script not found: %s", scriptPath)
+	}
+
+	return ResolvedCommand{Path: scriptPath, IsShellCommand: false}, nil
 }
 
 type PromptOption struct {

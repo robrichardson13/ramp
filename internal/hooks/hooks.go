@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"ramp/internal/config"
@@ -105,30 +104,27 @@ func matchesCommand(hook *config.Hook, commandName string) bool {
 	return hook.For == commandName // Exact match
 }
 
-// runHook executes a single hook script.
+// runHook executes a single hook script or shell command.
 func runHook(
 	hook *config.Hook,
 	projectDir string,
 	workDir string,
 	env map[string]string,
 ) error {
-	// Resolve script path based on BaseDir (set during config merge)
-	var scriptPath string
-	if filepath.IsAbs(hook.Command) {
-		scriptPath = hook.Command
-	} else if hook.BaseDir != "" {
-		scriptPath = filepath.Join(hook.BaseDir, hook.Command)
-	} else {
-		// Fallback for backward compatibility
-		scriptPath = filepath.Join(projectDir, ".ramp", hook.Command)
-	}
-
-	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
-		return fmt.Errorf("hook script not found: %s", scriptPath)
+	resolved, err := config.ResolveCommand(hook.Command, hook.BaseDir, projectDir)
+	if err != nil {
+		return err
 	}
 
 	// Use login shell (-l) for consistent environment
-	cmd := exec.Command("/bin/bash", "-l", scriptPath)
+	// For shell commands, use 'bash -c 'cmd "$@"' _' pattern for safe arg passing
+	// (consistent with operations/run.go even though hooks don't receive args today)
+	var cmd *exec.Cmd
+	if resolved.IsShellCommand {
+		cmd = exec.Command("/bin/bash", "-l", "-c", resolved.Path+` "$@"`, "_")
+	} else {
+		cmd = exec.Command("/bin/bash", "-l", resolved.Path)
+	}
 	cmd.Dir = workDir
 
 	// Build environment
