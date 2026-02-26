@@ -1584,3 +1584,211 @@ repos:
 		t.Error("LoadConfig() should return error for duplicate repo names")
 	}
 }
+
+// TestResolveCommand tests the ResolveCommand function for shell commands vs file paths
+func TestResolveCommand(t *testing.T) {
+	// Create temp directory with test scripts
+	tempDir := t.TempDir()
+	rampDir := filepath.Join(tempDir, ".ramp")
+	scriptsDir := filepath.Join(rampDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0755); err != nil {
+		t.Fatalf("failed to create scripts dir: %v", err)
+	}
+
+	// Create a test script
+	testScript := filepath.Join(scriptsDir, "test.sh")
+	if err := os.WriteFile(testScript, []byte("#!/bin/bash\necho test"), 0755); err != nil {
+		t.Fatalf("failed to write test script: %v", err)
+	}
+
+	// Create a script in a custom baseDir
+	customDir := filepath.Join(tempDir, "custom")
+	if err := os.MkdirAll(customDir, 0755); err != nil {
+		t.Fatalf("failed to create custom dir: %v", err)
+	}
+	customScript := filepath.Join(customDir, "custom.sh")
+	if err := os.WriteFile(customScript, []byte("#!/bin/bash\necho custom"), 0755); err != nil {
+		t.Fatalf("failed to write custom script: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		command        string
+		baseDir        string
+		projectDir     string
+		wantPath       string
+		wantShell      bool
+		wantErr        bool
+		wantErrContain string
+	}{
+		{
+			name:       "shell command with spaces",
+			command:    "bun scripts/test.ts",
+			baseDir:    "",
+			projectDir: tempDir,
+			wantPath:   "bun scripts/test.ts",
+			wantShell:  true,
+			wantErr:    false,
+		},
+		{
+			name:       "shell command with multiple spaces",
+			command:    "npm run test --watch",
+			baseDir:    "",
+			projectDir: tempDir,
+			wantPath:   "npm run test --watch",
+			wantShell:  true,
+			wantErr:    false,
+		},
+		{
+			name:       "file path resolved from .ramp",
+			command:    "scripts/test.sh",
+			baseDir:    "",
+			projectDir: tempDir,
+			wantPath:   filepath.Join(rampDir, "scripts/test.sh"),
+			wantShell:  false,
+			wantErr:    false,
+		},
+		{
+			name:       "file path resolved from baseDir",
+			command:    "custom.sh",
+			baseDir:    customDir,
+			projectDir: tempDir,
+			wantPath:   customScript,
+			wantShell:  false,
+			wantErr:    false,
+		},
+		{
+			name:       "absolute path",
+			command:    testScript,
+			baseDir:    "",
+			projectDir: tempDir,
+			wantPath:   testScript,
+			wantShell:  false,
+			wantErr:    false,
+		},
+		{
+			name:           "empty command",
+			command:        "",
+			baseDir:        "",
+			projectDir:     tempDir,
+			wantErr:        true,
+			wantErrContain: "command is empty",
+		},
+		{
+			name:           "whitespace-only command",
+			command:        "   ",
+			baseDir:        "",
+			projectDir:     tempDir,
+			wantErr:        true,
+			wantErrContain: "command is empty",
+		},
+		{
+			name:           "tab-only command",
+			command:        "\t\t",
+			baseDir:        "",
+			projectDir:     tempDir,
+			wantErr:        true,
+			wantErrContain: "command is empty",
+		},
+		{
+			name:           "nonexistent file path",
+			command:        "scripts/nonexistent.sh",
+			baseDir:        "",
+			projectDir:     tempDir,
+			wantErr:        true,
+			wantErrContain: "script not found",
+		},
+		{
+			name:       "command with leading/trailing whitespace",
+			command:    "  bun test  ",
+			baseDir:    "",
+			projectDir: tempDir,
+			wantPath:   "bun test",
+			wantShell:  true,
+			wantErr:    false,
+		},
+		{
+			name:       "command with pipe (shell)",
+			command:    "cat file | grep pattern",
+			baseDir:    "",
+			projectDir: tempDir,
+			wantPath:   "cat file | grep pattern",
+			wantShell:  true,
+			wantErr:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveCommand(tt.command, tt.baseDir, tt.projectDir)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ResolveCommand() expected error, got nil")
+					return
+				}
+				if tt.wantErrContain != "" && !contains(err.Error(), tt.wantErrContain) {
+					t.Errorf("ResolveCommand() error = %q, want error containing %q", err.Error(), tt.wantErrContain)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("ResolveCommand() unexpected error: %v", err)
+				return
+			}
+
+			if got.Path != tt.wantPath {
+				t.Errorf("ResolveCommand() Path = %q, want %q", got.Path, tt.wantPath)
+			}
+
+			if got.IsShellCommand != tt.wantShell {
+				t.Errorf("ResolveCommand() IsShellCommand = %v, want %v", got.IsShellCommand, tt.wantShell)
+			}
+		})
+	}
+}
+
+// TestResolveCommandBaseDirPrecedence tests that baseDir takes precedence over projectDir/.ramp/
+func TestResolveCommandBaseDirPrecedence(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create script in both locations with same relative path
+	rampScriptsDir := filepath.Join(tempDir, ".ramp", "scripts")
+	customScriptsDir := filepath.Join(tempDir, "custom", "scripts")
+
+	if err := os.MkdirAll(rampScriptsDir, 0755); err != nil {
+		t.Fatalf("failed to create .ramp/scripts dir: %v", err)
+	}
+	if err := os.MkdirAll(customScriptsDir, 0755); err != nil {
+		t.Fatalf("failed to create custom/scripts dir: %v", err)
+	}
+
+	rampScript := filepath.Join(rampScriptsDir, "run.sh")
+	customScript := filepath.Join(customScriptsDir, "run.sh")
+
+	if err := os.WriteFile(rampScript, []byte("ramp version"), 0755); err != nil {
+		t.Fatalf("failed to write ramp script: %v", err)
+	}
+	if err := os.WriteFile(customScript, []byte("custom version"), 0755); err != nil {
+		t.Fatalf("failed to write custom script: %v", err)
+	}
+
+	// With baseDir set, should resolve from baseDir
+	got, err := ResolveCommand("scripts/run.sh", filepath.Join(tempDir, "custom"), tempDir)
+	if err != nil {
+		t.Fatalf("ResolveCommand() error = %v", err)
+	}
+	if got.Path != customScript {
+		t.Errorf("ResolveCommand() with baseDir should resolve to %q, got %q", customScript, got.Path)
+	}
+
+	// Without baseDir, should resolve from .ramp/
+	got, err = ResolveCommand("scripts/run.sh", "", tempDir)
+	if err != nil {
+		t.Fatalf("ResolveCommand() error = %v", err)
+	}
+	if got.Path != rampScript {
+		t.Errorf("ResolveCommand() without baseDir should resolve to %q, got %q", rampScript, got.Path)
+	}
+}

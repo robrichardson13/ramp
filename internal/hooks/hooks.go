@@ -117,9 +117,11 @@ func runHook(
 	}
 
 	// Use login shell (-l) for consistent environment
+	// For shell commands, use 'bash -c 'cmd "$@"' _' pattern for safe arg passing
+	// (consistent with operations/run.go even though hooks don't receive args today)
 	var cmd *exec.Cmd
 	if resolved.IsShellCommand {
-		cmd = exec.Command("/bin/bash", "-l", "-c", resolved.Path)
+		cmd = exec.Command("/bin/bash", "-l", "-c", resolved.Path+` "$@"`, "_")
 	} else {
 		cmd = exec.Command("/bin/bash", "-l", resolved.Path)
 	}

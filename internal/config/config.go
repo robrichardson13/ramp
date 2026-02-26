@@ -59,7 +59,7 @@ type Command struct {
 // Hook represents a script to execute at a specific lifecycle event.
 type Hook struct {
 	Event   string `yaml:"event"`         // up, down, run
-	Command string `yaml:"command"`       // Path to script relative to .ramp/
+	Command string `yaml:"command"`       // Script path (relative to .ramp/) or shell command (if contains spaces)
 	For     string `yaml:"for,omitempty"` // For run hooks: command name, prefix pattern (e.g., "test-*"), or empty for all
 	BaseDir string `yaml:"-"`             // Set during merge, excluded from YAML
 }
@@ -81,6 +81,12 @@ type ResolvedCommand struct {
 func ResolveCommand(command, baseDir, projectDir string) (ResolvedCommand, error) {
 	// Trim whitespace to handle YAML quirks (e.g., trailing spaces)
 	command = strings.TrimSpace(command)
+
+	// Reject empty commands early - an empty string would resolve to a directory
+	// path that passes os.Stat but fails at execution
+	if command == "" {
+		return ResolvedCommand{}, fmt.Errorf("command is empty")
+	}
 
 	if strings.Contains(command, " ") {
 		return ResolvedCommand{Path: command, IsShellCommand: true}, nil
