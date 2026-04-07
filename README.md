@@ -73,6 +73,19 @@ ramp init         # Interactive setup
 ramp up my-feature # Start coding!
 ```
 
+## Claude Code Plugin
+
+Ramp ships with a [Claude Code](https://claude.com/claude-code) plugin that teaches Claude how to work with `ramp.yaml` configs, setup/cleanup scripts, and worktree-based features.
+
+Install it from inside Claude Code:
+
+```
+/plugin marketplace add FreedomForeverSolar/ramp
+/plugin install ramp@ramp
+```
+
+Once installed, the `ramp-cli` skill activates automatically when you're working in a `.ramp/` directory or editing ramp configuration.
+
 ## Desktop App
 
 <img src="docs/images/app-icon.png" width="64" align="left" style="margin-right: 16px">

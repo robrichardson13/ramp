@@ -1,0 +1,14 @@
+{
+  "name": "ramp",
+  "description": "Plugin for Ramp CLI development",
+  "owner": {
+    "name": "Ramp"
+  },
+  "plugins": [
+    {
+      "name": "ramp",
+      "source": "./plugins/ramp",
+      "description": "Skills for working with the Ramp CLI codebase"
+    }
+  ]
+}
