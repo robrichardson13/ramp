@@ -17,6 +17,7 @@ export interface Repo {
   name: string;
   path: string;
   git: string;
+  localName?: string;
   autoRefresh: boolean;
 }
 
@@ -97,6 +98,7 @@ export interface CommandsResponse {
 
 export interface RunCommandRequest {
   featureName?: string; // Optional - if empty, runs against source
+  args?: string[]; // Optional - arguments to pass to the script
 }
 
 export interface CancelCommandRequest {

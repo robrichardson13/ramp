@@ -7,10 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"ramp/internal/config"
+	"ramp/internal/hooks"
 	"ramp/internal/ports"
 )
 
@@ -23,6 +26,7 @@ type RunOptions struct {
 	Config      *config.Config
 	CommandName string
 	FeatureName string           // Empty = run against source
+	Args        []string         // Arguments to pass to the script
 	Progress    ProgressReporter
 	Output      OutputStreamer   // For streaming stdout/stderr
 
@@ -51,8 +55,16 @@ func RunCommand(opts RunOptions) (*RunResult, error) {
 	commandName := opts.CommandName
 	featureName := opts.FeatureName
 
-	// Find the command in configuration
-	command := cfg.GetCommand(commandName)
+	// Load merged config to support commands from local and user configs
+	mergedCfg, mergeErr := config.LoadMergedConfig(projectDir)
+
+	// Find the command in configuration (try merged config first, fall back to project config)
+	var command *config.Command
+	if mergeErr == nil {
+		command = mergedCfg.GetCommand(commandName)
+	} else {
+		command = cfg.GetCommand(commandName)
+	}
 	if command == nil {
 		return nil, fmt.Errorf("command '%s' not found in configuration", commandName)
 	}
@@ -66,12 +78,13 @@ func RunCommand(opts RunOptions) (*RunResult, error) {
 		return nil, fmt.Errorf("command '%s' requires a feature name", commandName)
 	}
 
-	scriptPath := filepath.Join(projectDir, ".ramp", command.Command)
-
-	// Validate script exists
-	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("command script not found: %s", scriptPath)
+	// Resolve the command: detect shell commands vs file paths and resolve paths
+	resolved, resolveErr := config.ResolveCommand(command.Command, command.BaseDir, projectDir)
+	if resolveErr != nil {
+		return nil, fmt.Errorf("command '%s': %w", commandName, resolveErr)
 	}
+	scriptPath := resolved.Path
+	isShellCommand := resolved.IsShellCommand
 
 	start := time.Now()
 
@@ -81,7 +94,7 @@ func RunCommand(opts RunOptions) (*RunResult, error) {
 	if featureName == "" {
 		// Source mode
 		progress.Start(fmt.Sprintf("Running '%s' against source repositories", commandName))
-		exitCode, err = runInSource(opts, scriptPath)
+		exitCode, err = runInSource(opts, scriptPath, isShellCommand)
 	} else {
 		// Feature mode
 		treesDir := filepath.Join(projectDir, "trees", featureName)
@@ -92,13 +105,16 @@ func RunCommand(opts RunOptions) (*RunResult, error) {
 		}
 
 		progress.Start(fmt.Sprintf("Running '%s' for feature '%s'", commandName, featureName))
-		exitCode, err = runInFeature(opts, scriptPath, treesDir)
+		exitCode, err = runInFeature(opts, scriptPath, treesDir, isShellCommand)
 	}
 
 	duration := time.Since(start)
 
 	if err != nil {
-		progress.Error(fmt.Sprintf("Command '%s' failed: %v", commandName, err))
+		// Don't show error message for intentional cancellation
+		if !errors.Is(err, ErrCommandCancelled) {
+			progress.Error(fmt.Sprintf("Command '%s' failed: %v", commandName, err))
+		}
 		return &RunResult{
 			CommandName: commandName,
 			ExitCode:    exitCode,
@@ -112,7 +128,35 @@ func RunCommand(opts RunOptions) (*RunResult, error) {
 			CommandName: commandName,
 			ExitCode:    exitCode,
 			Duration:    duration,
-		}, fmt.Errorf("command exited with code %d", exitCode)
+		}, fmt.Errorf("command '%s' failed: exited with code %d", commandName, exitCode)
+	}
+
+	// Execute run hooks (after command success)
+	if mergeErr == nil && len(mergedCfg.Hooks) > 0 {
+		repos := cfg.GetRepos()
+		var allocatedPorts []int
+		var treesDir, workDir string
+		displayName := ""
+
+		if featureName != "" {
+			treesDir = filepath.Join(projectDir, "trees", featureName)
+			workDir = treesDir
+			displayName = LoadDisplayName(projectDir, featureName)
+			if cfg.HasPortConfig() {
+				portAllocations, portErr := ports.NewPortAllocations(projectDir, cfg.GetBasePort(), cfg.GetMaxPorts())
+				if portErr == nil {
+					if p, exists := portAllocations.GetPorts(featureName); exists {
+						allocatedPorts = p
+					}
+				}
+			}
+		} else {
+			workDir = projectDir
+		}
+
+		hookEnv := BuildEnvVars(projectDir, treesDir, featureName, displayName, allocatedPorts, cfg, repos)
+		hookEnv["RAMP_COMMAND_NAME"] = commandName
+		hooks.ExecuteHooksForCommand(mergedCfg.Hooks, commandName, projectDir, workDir, hookEnv, progress)
 	}
 
 	progress.Complete(fmt.Sprintf("Command '%s' completed successfully", commandName))
@@ -124,60 +168,89 @@ func RunCommand(opts RunOptions) (*RunResult, error) {
 	}, nil
 }
 
+// buildBashCommand creates an exec.Cmd for running a script with login shell.
+// Uses -l flag to source user's profile, ensuring tools like bun/node are available.
+func buildBashCommand(scriptPath string, args []string, workDir string) *exec.Cmd {
+	bashArgs := append([]string{"-l", scriptPath}, args...)
+	cmd := exec.Command("/bin/bash", bashArgs...)
+	cmd.Dir = workDir
+	return cmd
+}
+
+// buildShellCommand creates an exec.Cmd for running a shell command string.
+// Uses bash -l -c to execute arbitrary shell commands (pipes, redirects, etc.).
+// Arguments are passed safely via "$@" to avoid shell injection.
+func buildShellCommand(command string, args []string, workDir string) *exec.Cmd {
+	// Use 'bash -c 'cmd "$@"' _ arg1 arg2' pattern to safely pass arguments
+	// without shell expansion. The "_" is a placeholder for $0.
+	bashArgs := []string{"-l", "-c", command + ` "$@"`, "_"}
+	bashArgs = append(bashArgs, args...)
+	cmd := exec.Command("/bin/bash", bashArgs...)
+	cmd.Dir = workDir
+	return cmd
+}
+
+// appendArgsEnv adds RAMP_ARGS to the environment if args are provided.
+func appendArgsEnv(env []string, args []string) []string {
+	if len(args) > 0 {
+		return append(env, fmt.Sprintf("RAMP_ARGS=%s", strings.Join(args, " ")))
+	}
+	return env
+}
+
 // runInFeature executes a command in feature mode with feature-specific env vars.
-func runInFeature(opts RunOptions, scriptPath, treesDir string) (int, error) {
+func runInFeature(opts RunOptions, scriptPath, treesDir string, isShellCommand bool) (int, error) {
 	projectDir := opts.ProjectDir
 	cfg := opts.Config
 	featureName := opts.FeatureName
+	displayName := LoadDisplayName(projectDir, featureName)
 
-	// Use login shell (-l) to source user's profile and get full PATH
-	// This ensures tools like bun, node, etc. are available in GUI environments
-	cmd := exec.Command("/bin/bash", "-l", scriptPath)
-	cmd.Dir = treesDir
-
-	// Build environment variables
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("RAMP_PROJECT_DIR=%s", projectDir),
-		fmt.Sprintf("RAMP_TREES_DIR=%s", treesDir),
-		fmt.Sprintf("RAMP_WORKTREE_NAME=%s", featureName),
-	)
-
-	// Add port environment variables
+	// Get allocated ports
+	var allocatedPorts []int
 	portAllocations, err := ports.NewPortAllocations(projectDir, cfg.GetBasePort(), cfg.GetMaxPorts())
 	if err == nil {
-		if allocatedPorts, exists := portAllocations.GetPorts(featureName); exists {
-			addPortEnvVars(cmd, allocatedPorts)
+		if p, exists := portAllocations.GetPorts(featureName); exists {
+			allocatedPorts = p
 		}
 	}
 
-	// Add repo path variables
+	var cmd *exec.Cmd
+	if isShellCommand {
+		cmd = buildShellCommand(scriptPath, opts.Args, treesDir)
+	} else {
+		cmd = buildBashCommand(scriptPath, opts.Args, treesDir)
+	}
+
+	// Build environment variables using the standard builder, but override repo paths for worktrees
 	repos := cfg.GetRepos()
-	for name, repo := range repos {
+	cmd.Env = BuildScriptEnv(projectDir, treesDir, featureName, displayName, allocatedPorts, cfg, repos)
+
+	// Override repo paths to use worktree paths instead of source paths
+	for name := range repos {
 		envVarName := config.GenerateEnvVarName(name)
-		repoPath := repo.GetRepoPath(projectDir)
+		repoPath := filepath.Join(treesDir, name)
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", envVarName, repoPath))
 	}
 
-	// Add local config environment variables
-	localEnvVars, err := GetLocalEnvVars(projectDir)
-	if err == nil {
-		for key, value := range localEnvVars {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
-		}
-	}
+	cmd.Env = appendArgsEnv(cmd.Env, opts.Args)
+
+	// Stop spinner before streaming output to avoid visual conflicts
+	opts.Progress.Stop()
 
 	return executeWithStreaming(cmd, opts.Output, opts.Cancel, opts.ProcessCallback)
 }
 
 // runInSource executes a command in source mode against the project directory.
-func runInSource(opts RunOptions, scriptPath string) (int, error) {
+func runInSource(opts RunOptions, scriptPath string, isShellCommand bool) (int, error) {
 	projectDir := opts.ProjectDir
 	cfg := opts.Config
 
-	// Use login shell (-l) to source user's profile and get full PATH
-	// This ensures tools like bun, node, etc. are available in GUI environments
-	cmd := exec.Command("/bin/bash", "-l", scriptPath)
-	cmd.Dir = projectDir
+	var cmd *exec.Cmd
+	if isShellCommand {
+		cmd = buildShellCommand(scriptPath, opts.Args, projectDir)
+	} else {
+		cmd = buildBashCommand(scriptPath, opts.Args, projectDir)
+	}
 
 	// Build environment variables (excluding feature-specific vars)
 	cmd.Env = append(os.Environ(),
@@ -199,6 +272,11 @@ func runInSource(opts RunOptions, scriptPath string) (int, error) {
 			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 		}
 	}
+
+	cmd.Env = appendArgsEnv(cmd.Env, opts.Args)
+
+	// Stop spinner before streaming output to avoid visual conflicts
+	opts.Progress.Stop()
 
 	return executeWithStreaming(cmd, opts.Output, opts.Cancel, opts.ProcessCallback)
 }
@@ -235,8 +313,13 @@ func executeWithStreaming(cmd *exec.Cmd, output OutputStreamer, cancel <-chan st
 		processCallback(cmd, pgid)
 	}
 
+	// WaitGroup to ensure output goroutines complete before returning
+	var wg sync.WaitGroup
+
 	// Stream stdout
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			if output != nil {
@@ -246,7 +329,9 @@ func executeWithStreaming(cmd *exec.Cmd, output OutputStreamer, cancel <-chan st
 	}()
 
 	// Stream stderr
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			if output != nil {
@@ -264,6 +349,7 @@ func executeWithStreaming(cmd *exec.Cmd, output OutputStreamer, cancel <-chan st
 	// Wait for completion or cancellation
 	select {
 	case err := <-resultCh:
+		wg.Wait() // Ensure output goroutines complete before returning
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				return exitErr.ExitCode(), nil
@@ -273,28 +359,21 @@ func executeWithStreaming(cmd *exec.Cmd, output OutputStreamer, cancel <-chan st
 		return 0, nil
 
 	case <-cancel:
-		// Kill entire process group with SIGKILL
-		// Negative PID kills all processes in the process group
-		syscall.Kill(-pgid, syscall.SIGKILL)
+		// Send SIGTERM first to allow graceful shutdown (trap handlers)
+		// Negative PID sends signal to all processes in the process group
+		syscall.Kill(-pgid, syscall.SIGTERM)
 
-		// Wait for the process to actually terminate
-		<-resultCh
+		// Wait up to 5 seconds for graceful termination
+		select {
+		case <-resultCh:
+			// Process exited gracefully
+		case <-time.After(5 * time.Second):
+			// Force kill if still running
+			syscall.Kill(-pgid, syscall.SIGKILL)
+			<-resultCh
+		}
 
+		wg.Wait() // Ensure output goroutines complete before returning
 		return -1, ErrCommandCancelled
-	}
-}
-
-// addPortEnvVars adds port environment variables to a command.
-func addPortEnvVars(cmd *exec.Cmd, ports []int) {
-	if len(ports) == 0 {
-		return
-	}
-
-	// Set RAMP_PORT to first port (backward compatibility)
-	cmd.Env = append(cmd.Env, fmt.Sprintf("RAMP_PORT=%d", ports[0]))
-
-	// Set indexed ports (RAMP_PORT_1, RAMP_PORT_2, etc.)
-	for i, port := range ports {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("RAMP_PORT_%d=%d", i+1, port))
 	}
 }

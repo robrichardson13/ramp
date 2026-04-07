@@ -35,7 +35,7 @@ brew install freedomforeversolar/tools/ramp
 git clone https://github.com/FreedomForeverSolar/ramp.git
 cd ramp
 go build -o ramp .
-sudo ./install.sh
+./install.sh
 ```
 
 ### Auto-Updates
@@ -144,8 +144,9 @@ cleanup: scripts/cleanup.sh  # Run before 'ramp down'
 
 default-branch-prefix: feature/
 
-base_port: 3000  # Allocate one unique port per feature
-max_ports: 100
+base_port: 3000
+max_ports: 200
+ports_per_feature: 2  # Allocate 2 ports per feature
 
 commands:
   - name: dev
@@ -155,6 +156,7 @@ commands:
 Scripts receive environment variables for automation:
 - `RAMP_PORT` - Unique port for this feature
 - `RAMP_TREES_DIR` - Feature workspace path
+- `RAMP_DISPLAY_NAME` - Human-readable name (if set via `--name`)
 - `RAMP_REPO_PATH_<NAME>` - Path to each repository
 
 See [docs/configuration.md](docs/configuration.md) for full reference.
@@ -175,7 +177,7 @@ npm install
 # Start database on feature-specific port
 docker run -d \
   --name "db-${RAMP_WORKTREE_NAME}" \
-  -p "$((RAMP_PORT + 32)):5432" \
+  -p "$RAMP_PORT_2:5432" \
   postgres:15
 
 # Run migrations

@@ -23,7 +23,7 @@ This is similar to 'npm init' - it will guide you through creating a
 .ramp/ramp.yaml configuration file, .gitignore file, and optional setup scripts.
 
 The .gitignore file is automatically created with entries for ramp-managed files:
-repos/, trees/, .ramp/local.yaml, and .ramp/port_allocations.json.
+repos/, trees/, .ramp/local.yaml, .ramp/port_allocations.json, and .ramp/feature_metadata.json.
 
 After initialization, use 'ramp install' to clone the configured repositories.`,
 	Run: func(cmd *cobra.Command, args []string) {
@@ -438,7 +438,7 @@ func promptInstallRepos(projectDir string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Run install
+	// Run install (init always uses full clone for complete history)
 	fmt.Println()
-	return runInstallForProject(projectDir, cfg)
+	return runInstallForProject(projectDir, cfg, false)
 }

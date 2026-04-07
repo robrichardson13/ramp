@@ -21,6 +21,7 @@ type Repo struct {
 	Name        string `json:"name"`
 	Path        string `json:"path"`
 	Git         string `json:"git"`
+	LocalName   string `json:"localName,omitempty"`
 	AutoRefresh bool   `json:"autoRefresh"`
 }
 
@@ -166,7 +167,8 @@ type CommandsResponse struct {
 
 // RunCommandRequest is the request body for running a command
 type RunCommandRequest struct {
-	FeatureName string `json:"featureName,omitempty"` // Optional - if empty, runs against source
+	FeatureName string   `json:"featureName,omitempty"` // Optional - if empty, runs against source
+	Args        []string `json:"args,omitempty"`        // Optional - arguments to pass to the script
 }
 
 // CancelCommandRequest is the request body for cancelling a command

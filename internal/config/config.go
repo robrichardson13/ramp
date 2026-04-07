@@ -44,6 +44,7 @@ func (e *EnvFile) UnmarshalYAML(node *yaml.Node) error {
 type Repo struct {
 	Path        string    `yaml:"path"`
 	Git         string    `yaml:"git"`
+	LocalName   string    `yaml:"local_name,omitempty"`
 	AutoRefresh *bool     `yaml:"auto_refresh,omitempty"`
 	EnvFiles    []EnvFile `yaml:"env_files,omitempty"`
 }
@@ -52,6 +53,59 @@ type Command struct {
 	Name    string `yaml:"name"`
 	Command string `yaml:"command"`
 	Scope   string `yaml:"scope,omitempty"` // "source", "feature", or empty (both)
+	BaseDir string `yaml:"-"`               // Set during merge, excluded from YAML
+}
+
+// Hook represents a script to execute at a specific lifecycle event.
+type Hook struct {
+	Event   string `yaml:"event"`         // up, down, run
+	Command string `yaml:"command"`       // Script path (relative to .ramp/) or shell command (if contains spaces)
+	For     string `yaml:"for,omitempty"` // For run hooks: command name, prefix pattern (e.g., "test-*"), or empty for all
+	BaseDir string `yaml:"-"`             // Set during merge, excluded from YAML
+}
+
+// ResolvedCommand holds the result of resolving a command string.
+type ResolvedCommand struct {
+	Path           string // Resolved script path or shell command string
+	IsShellCommand bool   // True if this is a shell command (contains spaces)
+}
+
+// ResolveCommand determines whether a command string is a shell command or file path,
+// and resolves file paths using baseDir with a projectDir fallback.
+//
+// Heuristic: commands containing a space are shell commands (e.g., "bun scripts/test.ts"),
+// commands without spaces are file paths (e.g., "scripts/test.sh").
+//
+// For file paths, resolution order is: absolute path > baseDir > projectDir/.ramp/ fallback.
+// Returns an error if a file path does not exist on disk.
+func ResolveCommand(command, baseDir, projectDir string) (ResolvedCommand, error) {
+	// Trim whitespace to handle YAML quirks (e.g., trailing spaces)
+	command = strings.TrimSpace(command)
+
+	// Reject empty commands early - an empty string would resolve to a directory
+	// path that passes os.Stat but fails at execution
+	if command == "" {
+		return ResolvedCommand{}, fmt.Errorf("command is empty")
+	}
+
+	if strings.Contains(command, " ") {
+		return ResolvedCommand{Path: command, IsShellCommand: true}, nil
+	}
+
+	var scriptPath string
+	if filepath.IsAbs(command) {
+		scriptPath = command
+	} else if baseDir != "" {
+		scriptPath = filepath.Join(baseDir, command)
+	} else {
+		scriptPath = filepath.Join(projectDir, ".ramp", command)
+	}
+
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		return ResolvedCommand{}, fmt.Errorf("script not found: %s", scriptPath)
+	}
+
+	return ResolvedCommand{Path: scriptPath, IsShellCommand: false}, nil
 }
 
 type PromptOption struct {
@@ -73,6 +127,7 @@ type Config struct {
 	Cleanup             string     `yaml:"cleanup,omitempty"`
 	DefaultBranchPrefix string     `yaml:"default-branch-prefix,omitempty"`
 	Commands            []*Command `yaml:"commands,omitempty"`
+	Hooks               []*Hook    `yaml:"hooks,omitempty"`
 	BasePort            int        `yaml:"base_port,omitempty"`
 	MaxPorts            int        `yaml:"max_ports,omitempty"`
 	PortsPerFeature     int        `yaml:"ports_per_feature,omitempty"`
@@ -81,12 +136,14 @@ type Config struct {
 
 type LocalConfig struct {
 	Preferences map[string]string `yaml:"preferences"`
+	Commands    []*Command        `yaml:"commands,omitempty"`
+	Hooks       []*Hook           `yaml:"hooks,omitempty"`
 }
 
 func (c *Config) GetRepos() map[string]*Repo {
 	result := make(map[string]*Repo)
 	for _, repo := range c.Repos {
-		name := extractRepoName(repo.Git)
+		name := repo.Name()
 		result[name] = repo
 	}
 	return result
@@ -112,6 +169,17 @@ func (c *Config) GetCommandsForScope(scope string) []*Command {
 	for _, cmd := range c.Commands {
 		if cmd.Scope == "" || cmd.Scope == scope {
 			filtered = append(filtered, cmd)
+		}
+	}
+	return filtered
+}
+
+// GetHooksForEvent returns hooks filtered by event type.
+func (c *Config) GetHooksForEvent(event string) []*Hook {
+	var filtered []*Hook
+	for _, hook := range c.Hooks {
+		if hook.Event == event {
+			filtered = append(filtered, hook)
 		}
 	}
 	return filtered
@@ -154,17 +222,39 @@ func extractRepoName(repoPath string) string {
 			repoPath = parts[1]
 		}
 	}
-	
+
 	// Remove .git suffix
 	repoPath = strings.TrimSuffix(repoPath, ".git")
-	
+
 	// Extract repo name from owner/repo format
 	parts := strings.Split(repoPath, "/")
 	if len(parts) > 0 {
 		return parts[len(parts)-1]
 	}
-	
+
 	return repoPath
+}
+
+// Name returns the effective name for this repository.
+// If LocalName is set, it returns that; otherwise, it extracts the name from the Git URL.
+func (r *Repo) Name() string {
+	if r.LocalName != "" {
+		return r.LocalName
+	}
+	return extractRepoName(r.Git)
+}
+
+// ValidateRepoNames checks that all repository names are unique within the configuration.
+func (c *Config) ValidateRepoNames() error {
+	seen := make(map[string]string)
+	for _, repo := range c.Repos {
+		name := repo.Name()
+		if existingGit, exists := seen[name]; exists {
+			return fmt.Errorf("duplicate repository name %q: both %s and %s resolve to the same name", name, existingGit, repo.Git)
+		}
+		seen[name] = repo.Git
+	}
+	return nil
 }
 
 func LoadConfig(projectDir string) (*Config, error) {
@@ -178,6 +268,10 @@ func LoadConfig(projectDir string) (*Config, error) {
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
+	}
+
+	if err := config.ValidateRepoNames(); err != nil {
+		return nil, fmt.Errorf("invalid config %s: %w", configPath, err)
 	}
 
 	return &config, nil
@@ -213,8 +307,7 @@ func FindRampProject(startDir string) (string, error) {
 
 // GetRepoPath returns the absolute path where a repository should be located
 func (r *Repo) GetRepoPath(projectDir string) string {
-	repoName := extractRepoName(r.Git)
-	return filepath.Join(projectDir, r.Path, repoName)
+	return filepath.Join(projectDir, r.Path, r.Name())
 }
 
 // GetGitURL returns the git URL for cloning
@@ -270,6 +363,9 @@ func SaveConfig(cfg *Config, projectDir string) error {
 		for _, repo := range cfg.Repos {
 			yamlBuilder.WriteString(fmt.Sprintf("  - path: %s\n", repo.Path))
 			yamlBuilder.WriteString(fmt.Sprintf("    git: %s\n", repo.Git))
+			if repo.LocalName != "" {
+				yamlBuilder.WriteString(fmt.Sprintf("    local_name: %s\n", repo.LocalName))
+			}
 			if repo.AutoRefresh != nil {
 				yamlBuilder.WriteString(fmt.Sprintf("    auto_refresh: %t\n", *repo.AutoRefresh))
 			}
@@ -331,6 +427,18 @@ func SaveConfig(cfg *Config, projectDir string) error {
 			yamlBuilder.WriteString(fmt.Sprintf("    command: %s\n", cmd.Command))
 			if cmd.Scope != "" {
 				yamlBuilder.WriteString(fmt.Sprintf("    scope: %s\n", cmd.Scope))
+			}
+		}
+	}
+
+	// Hooks section
+	if len(cfg.Hooks) > 0 {
+		yamlBuilder.WriteString("\nhooks:\n")
+		for _, hook := range cfg.Hooks {
+			yamlBuilder.WriteString(fmt.Sprintf("  - event: %s\n", hook.Event))
+			yamlBuilder.WriteString(fmt.Sprintf("    command: %s\n", hook.Command))
+			if hook.For != "" {
+				yamlBuilder.WriteString(fmt.Sprintf("    for: %s\n", hook.For))
 			}
 		}
 	}
